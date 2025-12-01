@@ -1,0 +1,210 @@
+_G.Active = true
+
+local CLICK_DELAY = 0.1
+local MOVEMENT_SPEED = 0.1    -- interp
+local SPEED_CAP = 3           -- Max movement per tick
+local KEY_1 = 0x31            
+local SAFE_RADIUS = 40        -- Radius to avoid MOBS
+local PLAYER_MINING_DIST = 10 -- Radius to avoid PLAYERS (If they are near a rock, skip it)
+local MOB_AVOID_DIST = 30     -- Distance to start running away from mobs
+local AVOID_STRENGTH = 5.0    -- How hard to push away from mobs
+
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local LocalPlayer = Players.LocalPlayer
+
+local RockFolder = Workspace:WaitForChild("Rocks"):WaitForChild("Island2CaveMid") -- use explorer for farm location 
+local LivingFolder = Workspace:WaitForChild("Living")
+
+-- Helper: Manual Distance
+local function get_distance(pos1, pos2)
+    if not pos1 or not pos2 then return 999999 end
+    local dx = pos1.X - pos2.X
+    local dy = pos1.Y - pos2.Y
+    local dz = pos1.Z - pos2.Z
+    return math.sqrt(dx*dx + dy*dy + dz*dz)
+end
+
+local function is_target_safe(targetPos)
+    local entities = LivingFolder:GetChildren()
+    
+    for _, entity in ipairs(entities) do
+        if entity:IsA("Model") and entity.Name ~= LocalPlayer.Name then
+            local root = entity:FindFirstChild("HumanoidRootPart")
+            
+            if root then
+                local dist = get_distance(targetPos, root.Position)
+                
+                if entity:GetAttribute("IsNpc") == true then
+                    if dist < SAFE_RADIUS then
+                        return false 
+                    end
+                
+                else
+                    if dist < PLAYER_MINING_DIST then
+                        return false 
+                    end
+                end
+            end
+        end
+    end
+
+    return true 
+end
+
+local function get_avoidance_vector(currentPos)
+    local totalPushX, totalPushY = 0, 0
+    local entities = LivingFolder:GetChildren()
+    
+    for _, entity in ipairs(entities) do
+        if entity:IsA("Model") and entity:GetAttribute("IsNpc") == true then
+            local root = entity:FindFirstChild("HumanoidRootPart")
+            if root then
+                local dist = get_distance(currentPos, root.Position)
+                
+                if dist < MOB_AVOID_DIST and dist > 0.1 then
+                    local pushX = currentPos.X - root.Position.X
+                    local pushZ = currentPos.Z - root.Position.Z 
+                    
+                    local pushDist = math.sqrt(pushX*pushX + pushZ*pushZ)
+                    local normX = pushX / pushDist
+                    local normZ = pushZ / pushDist
+                    
+                    local weight = (MOB_AVOID_DIST - dist) / MOB_AVOID_DIST
+                    
+                    totalPushX = totalPushX + (normX * weight)
+                    totalPushY = totalPushY + (normZ * weight)
+                end
+            end
+        end
+    end
+    return totalPushX, totalPushY
+end
+
+-- Movement Logic
+local function move_to_position(targetPos)
+    local character = LocalPlayer.Character
+    if not character then return end
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    local currentPos = hrp.Position
+    local distance = get_distance(targetPos, currentPos)
+
+    if distance > 1 then 
+        local deltaX = targetPos.X - currentPos.X
+        local deltaZ = targetPos.Z - currentPos.Z
+        local flatDist = math.sqrt(deltaX*deltaX + deltaZ*deltaZ)
+        
+        local dirX = deltaX / flatDist
+        local dirZ = deltaZ / flatDist
+
+        local avoidX, avoidZ = get_avoidance_vector(currentPos)
+        
+        local finalDirX = dirX + (avoidX * AVOID_STRENGTH)
+        local finalDirZ = dirZ + (avoidZ * AVOID_STRENGTH)
+        
+        local finalDist = math.sqrt(finalDirX*finalDirX + finalDirZ*finalDirZ)
+        if finalDist > 0 then
+            finalDirX = finalDirX / finalDist
+            finalDirZ = finalDirZ / finalDist
+        end
+
+        local moveStep = distance * MOVEMENT_SPEED
+        if moveStep > SPEED_CAP then moveStep = SPEED_CAP end
+        
+        local newX = currentPos.X + (finalDirX * moveStep)
+        local newZ = currentPos.Z + (finalDirZ * moveStep)
+        local newY = currentPos.Y + (targetPos.Y - currentPos.Y) * MOVEMENT_SPEED
+
+        hrp.Position = Vector3.new(newX, newY, newZ)
+        hrp.AssemblyLinearVelocity = Vector3.new(finalDirX * 50, 0, finalDirZ * 50)
+
+    elseif distance <= 1 then
+        hrp.Position = targetPos
+        hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+    end
+end
+
+-- Target Finder
+local function find_target()
+    local children = RockFolder:GetChildren()
+    local closestTarget = nil
+    local closestHitbox = nil
+    local minDistance = 9999999
+    
+    local character = LocalPlayer.Character
+    if not character then return nil, nil end
+    local hrp = character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return nil, nil end
+    local myPos = hrp.Position
+    
+    for _, spawnLocation in ipairs(children) do
+        if spawnLocation:GetAttribute("IsOccupied") == true then
+            local veinModel = spawnLocation:FindFirstChildOfClass("Model")
+            if veinModel then
+                local hitbox = veinModel:FindFirstChild("Hitbox")
+                
+                -- Check if safe from Mobs AND Players
+                if hitbox and is_target_safe(hitbox.Position) then
+                    local dist = get_distance(myPos, hitbox.Position)
+                    if dist < minDistance then
+                        minDistance = dist
+                        closestTarget = spawnLocation
+                        closestHitbox = hitbox
+                    end
+                end
+            end
+        end
+    end
+    return closestTarget, closestHitbox
+end
+
+spawn(function()
+    while _G.Active do
+        local target, hitbox = find_target()
+
+        if target and hitbox then
+            while _G.Active and target.Parent and target:GetAttribute("IsOccupied") == true do
+                if hitbox and hitbox.Parent then
+                    if not is_target_safe(hitbox.Position) then break end
+                    move_to_position(hitbox.Position)
+                else
+                    break 
+                end
+
+                pcall(function()
+                    mouse1click() 
+                    keypress(KEY_1) 
+                    keyrelease(KEY_1) 
+                end)
+
+                wait(CLICK_DELAY)
+            end
+        else
+            local char = LocalPlayer.Character
+            if char then
+                local hrp = char:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    local currentPos = hrp.Position
+                    local avoidX, avoidZ = get_avoidance_vector(currentPos)
+                    local avoidMag = math.sqrt(avoidX*avoidX + avoidZ*avoidZ)
+                    
+                    if avoidMag > 0 then
+                        local moveDirX = avoidX / avoidMag
+                        local moveDirZ = avoidZ / avoidMag
+                        local moveStep = SPEED_CAP 
+                        local newX = currentPos.X + (moveDirX * moveStep)
+                        local newZ = currentPos.Z + (moveDirZ * moveStep)
+                        
+                        hrp.Position = Vector3.new(newX, currentPos.Y, newZ)
+                        hrp.AssemblyLinearVelocity = Vector3.new(moveDirX * 50, 0, moveDirZ * 50)
+                    else
+                        hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+                    end
+                end
+            end
+            wait(0.1) 
+        end
+    end
+end)
